@@ -8,7 +8,7 @@ This is an [OCF Resource Agent](http://linux-ha.org/wiki/OCF_Resource_Agents) fo
 
 You have to have [docker-py](https://pypi.python.org/pypi/docker-py/0.5.0) installed.
 
-Copy all files to `/usr/lib/ocf/resource.d/ekini/`.
+Copy `ekini` folder to `/usr/lib/ocf/resource.d/`.
 
 ## Supported parameters
 
