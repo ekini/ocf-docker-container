@@ -1,0 +1,134 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+# (c) Eugene Dementiev 2014 <eugene@dementiev.eu>
+#
+# docker ocf agent is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# docker ocf agent is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with docker ocf agent.  If not, see <http://www.gnu.org/licenses/>.
+
+import os
+import sys
+import re
+
+try:
+    import json
+except:
+    import simplejson as json
+
+import docker as docker_py
+from ocf import Agent, exits, Parameter
+
+
+class Docker(Agent):
+    name = "Docker resource agent"
+    longdesc = "Controls docker containers"
+    params = {"docker_url": Parameter(longdesc="Provides docker url", shortdesc="docker url", required=False, default="unix://var/run/docker.sock"),
+              "container_name": Parameter(longdesc="Container name", shortdesc="cname", required=True),
+              "image_name": Parameter(longdesc="Image name", shortdesc="iname", required=True),
+              "command": Parameter(longdesc="command", shortdesc="command", required=False, default=None),
+              "volumes": Parameter(longdesc="Dict of volumes", shortdesc="volumes", required=False),
+              "ports": Parameter(longdesc="Port publishing, the same as with docker run. blish a container's port to the host"
+                                          "format: ip:hostPort:containerPort | ip::containerPort | hostPort:containerPort", shortdesc="ports", required=False),
+              }
+    # method timeouts, can be meta_data_timeout, monitor_timeout, etc...
+    start_timeout = 60
+
+    def _param_volumes_loader(self, value):
+        if value:
+            try:
+                return json.loads(value)
+            except ValueError as e:
+                sys.stderr.write("got %r\n" % value)
+                raise
+
+    def _param_ports_loader(self, value):
+        ports_re = re.compile(r"""^(?:(?P<host_ip>(?:\d+\.){3}\d+):)? # matches ip, optional
+                                  (?:(?P<host_port>\d+):)?:? # matches hostport, optional
+                                  (?P<container_port>\d+)$ # matches containerport, mandatory
+                               """, re.VERBOSE)
+        ret = []
+        if value:
+            values = value.replace(" ", "").split(",")
+            for val in values:
+                try:
+                    ret.append(ports_re.match(val).groupdict())
+                except AttributeError as e:
+                    sys.stderr.write("got %r value!\n" % val)
+                    raise
+        return ret
+
+    def __init__(self):
+        super(Docker, self).__init__()
+        self.docker = docker_py.Client(base_url='unix://var/run/docker.sock')
+
+    def _find_container(self, name, all=False):
+        def names_filter(container):
+            name = self.param("container_name")
+            if not "/" in name:
+                name = "/" + name
+            if name in container["Names"]:
+                return True
+        containers = filter(names_filter, self.docker.containers(all=all))
+        if containers:
+            return containers[0]
+
+    def monitor(self):
+        if not self._find_container(self.param("container_name")):
+            raise exits.OCF_NOT_RUNNING("monitor: container '%s' not running" % self.param("container_name"))
+
+    def start(self):
+        volumes = self.param("volumes")
+        ports = self.param("ports")
+        if ports:
+            def converter(ports):
+                """Converts 'docker run'-style ports declaration to docker-py"""
+                ret = {}
+                for port in ports:
+                    if port["host_ip"]:
+                        ret.update({port["container_port"]: ((port["host_ip"], port["host_port"]) if port["host_port"] else (port["host_ip"], ))})
+                    else:
+                        ret.update({port["container_port"]: port["host_port"]})
+                return ret
+
+            port_bindings = converter(ports)
+        else:
+            port_bindings = None
+
+        if volumes:
+            binds = {volume: {"bind": bind, "ro": False} for bind, volume in volumes.items()}
+        else:
+            binds = None
+        container = self._find_container(self.param("container_name"), all=True)
+        if not container:
+            self.docker.create_container(self.param("image_name"),
+                                         command=self.param("command"),
+                                         name=self.param("container_name"),
+                                         volumes=volumes.keys() if volumes else None,
+                                         ports=[bind["container_port"] for bind in ports],
+                                         detach=True)
+
+        self.docker.start(self.param("container_name"), binds=binds, port_bindings=port_bindings)
+
+    def stop(self):
+        if self._find_container(self.param("container_name"), all=False):
+            self.docker.stop(self.param("container_name"))
+
+    def validate_all(self):
+        super(Docker, self).validate_all()
+
+
+def main():
+    Docker().run(sys.argv)
+
+if __name__ == "__main__":
+    main()
